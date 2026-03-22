@@ -1,53 +1,273 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 from agents.conversational_agent.conversational_agent import graph as conversational_graph
 from typing import Optional
+from services.postgresql import supabase,supabase_admin
+from services.redis import redis_client
+import uuid
+from contextlib import asynccontextmanager
+from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+from agents.conversational_agent.conversational_agent import graph as conversational_graph
+from datetime import datetime, timezone
 
-# http://127.0.0.1:8000/docs
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with AsyncRedisSaver.from_conn_string("redis://localhost:6379") as checkpointer:
+        await checkpointer.setup()
+        conversational_graph.checkpointer = checkpointer  # inyectar aquí
+        yield  # app arriba y corriendo
 
-app = FastAPI(title="English Learner Chat")
+app = FastAPI(title="English Learner Chat", lifespan=lifespan)
 
-# Almacén de sesiones en memoria (simple, sin DB por ahora)
-sessions: dict[str, list] = {}
+security = HTTPBearer()
+
+# ── Auth ───────────────────────────────────────────────────
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    try:
+        user = supabase.auth.get_user(token)
+        if not user or not user.user:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return user.user
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    
+class SignUpRequest(BaseModel):
+    email: str
+    password: str
+
+class SignInRequest(BaseModel):
+    email: str
+    password: str
+
+# ── Modelos ────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
-    session_id: str
+    thread_id: str
     message: str
 
 class ChatResponse(BaseModel):
-    session_id: str
     response: str
     correction: Optional[str] = None
 
+class ConversationInfo(BaseModel):
+    thread_id: str
+    preview: str
+    created_at: str
+
+class WordReview(BaseModel):
+    id: int
+    word: str
+    translation: str
+    example: str | None = None
+    level: str
+
+class WordProgress(BaseModel):
+    word_id: str  # uuid
+    score: int    # int2
+
+class VocabularyReviewUpdate(BaseModel):
+    words: list[WordProgress]
+
+# ── Endpoints ──────────────────────────────────────────────
+
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    # Recuperar historial de la sesión o crear uno nuevo
-    history = sessions.get(request.session_id, [])
-    
-    # Añadir mensaje del usuario
-    history.append(HumanMessage(content=request.message))
-    
-    # Invocar el grafo con el historial completo
-    result = await conversational_graph.ainvoke({"messages": history})
-    
-    # Guardar historial actualizado
-    sessions[request.session_id] = result["messages"]
-    
-    # Extraer la última respuesta del asistente
-    ai_response = result["messages"][-1].content
-    
-    return ChatResponse(
-        session_id=request.session_id,
-        response=ai_response,
-        correction=result.get("correction")
+async def chat(request: ChatRequest, current_user=Depends(get_current_user)):
+    user_id = current_user.id
+
+    ownership = supabase_admin.table("conversations") \
+        .select("thread_id") \
+        .eq("thread_id", request.thread_id) \
+        .eq("user_id", user_id) \
+        .limit(1) \
+        .execute()
+
+    if not ownership.data:
+        raise HTTPException(status_code=403, detail="Conversation not found or access denied")
+
+    config = {"configurable": {"thread_id": request.thread_id}}
+
+    graph_result = await conversational_graph.ainvoke(
+        {"messages": [HumanMessage(content=request.message)]},
+        config=config,
+        durability="async"
     )
 
-@app.delete("/chat/{session_id}")
-async def clear_session(session_id: str):
-    sessions.pop(session_id, None)
-    return {"message": f"Session {session_id} cleared"}
+    ai_response = graph_result["messages"][-1].content
 
+    supabase_admin.table("messages").insert([
+        {"thread_id": request.thread_id, "role": "user",      "content": request.message},
+        {"thread_id": request.thread_id, "role": "assistant", "content": ai_response},
+    ]).execute()
+
+    return ChatResponse(
+        response=ai_response,
+        correction=graph_result.get("correction")
+    )
+
+
+@app.post("/conversations")
+async def create_conversation(current_user=Depends(get_current_user)):
+    thread_id = str(uuid.uuid4())
+
+    supabase_admin.table("conversations").insert({
+        "thread_id": thread_id,
+        "user_id": current_user.id,
+    }).execute()
+
+    return {"thread_id": thread_id}
+
+
+@app.get("/conversations", response_model=list[ConversationInfo])
+async def get_conversations(current_user=Depends(get_current_user)):
+    result = supabase.table("conversations") \
+        .select("thread_id, created_at, topic") \
+        .eq("user_id", current_user.id) \
+        .order("created_at", desc=True) \
+        .execute()
+
+    return [
+        ConversationInfo(
+            thread_id=row["thread_id"],
+            preview=row["topic"] or "New conversation",
+            created_at=row["created_at"]
+        )
+        for row in result.data
+    ]
+
+@app.delete("/conversations/{thread_id}")
+async def delete_conversation(thread_id: str, current_user=Depends(get_current_user)):
+    user_id = current_user.id
+
+    supabase_admin.table("conversations") \
+        .delete() \
+        .eq("thread_id", thread_id) \
+        .eq("user_id", user_id) \
+        .execute()
+
+    # Borrar checkpoint de Redis
+    pattern = f"checkpoint:{thread_id}:*"
+    keys = redis_client.keys(pattern)
+    if keys:
+        redis_client.delete(*keys)
+
+    return {"message": f"Conversation {thread_id} deleted"}
+
+@app.get("/vocabulary_review", response_model=list[WordReview])
+async def get_vocabulary_review(current_user=Depends(get_current_user)):
+    """
+    Este método recupera un subconjunto del vocabulario en base al nivel elegido y al progreso del usuario
+    """
+
+    # 1. Mirar word id con bajo score para el user_id. Recupera maximo 20 words mas antiguas.
+    user_words = supabase.table("progress") \
+        .select("word_id") \
+        .eq("user_id", current_user.id) \
+        .lte("score", 2) \
+        .order("last_review", desc=False) \
+        .limit(20) \
+        .execute()
+    user_word_ids = [row["word_id"] for row in user_words.data]
+
+    if len(user_word_ids) < 20:
+        # 2. Recuperar las palabras que ya tiene el user (para review)
+        known_words = supabase.table("vocabulary") \
+            .select("word, translation, example, id, level") \
+            .in_("id", user_word_ids) \
+            .execute()
+
+        # 3. Completar hasta 20 con palabras nuevas random según nivel
+        new_words = supabase.table("vocabulary") \
+            .select("word, translation, example, id, level") \
+            .eq("level", current_user.level) \
+            .not_.in_("id", user_word_ids) \
+            .order("random()") \
+            .limit(20 - len(user_word_ids)) \
+            .execute()
+
+        words_review = known_words.data + new_words.data
+    else:
+        # Ya tiene 20 palabras para repasar
+        words_review = supabase.table("vocabulary") \
+            .select("word, translation, example, id, level") \
+            .in_("id", user_word_ids) \
+            .execute()
+        words_review = words_review.data
+    return words_review
+
+
+@app.post("/vocabulary_review")
+async def update_vocabulary_review(review: VocabularyReviewUpdate, current_user=Depends(get_current_user)):
+    """
+    Finaliza la revisión del vocabulario. Se actualiza progress
+    """
+    now = datetime.now(timezone.utc).isoformat()
+
+    for word in review.words:
+        supabase.table("progress") \
+            .upsert({
+                "user_id": current_user.id,
+                "word_id": word.word_id,
+                "score": word.score,
+                "last_review": now
+            }) \
+            .execute()
+
+    return {"updated": len(review.words)}
+
+@app.post("/auth/signup")
+async def signup(request: SignUpRequest):
+    try:
+        response = supabase.auth.sign_up({
+            "email": request.email,
+            "password": request.password,
+        })
+
+        # Crear perfil en la tabla profiles
+        supabase.table("profiles").insert({
+            "id": response.user.id,
+            "email": request.email,
+            "level": 0
+        }).execute()
+
+        return {
+            "user_id": response.user.id,
+            "email": response.user.email,
+            "message": "User created successfully"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/auth/signin")
+async def signin(request: SignInRequest):
+    try:
+        response = supabase.auth.sign_in_with_password({
+            "email": request.email,
+            "password": request.password,
+        })
+
+        return {
+            "access_token": response.session.access_token,
+            "token_type": "bearer",
+            "user_id": response.user.id,
+            "email": response.user.email,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+
+@app.post("/auth/signout")
+async def signout(current_user=Depends(get_current_user)):
+    try:
+        supabase.auth.sign_out()
+        return {"message": "Signed out successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
 @app.get("/health")
 async def health():
     return {"status": "ok"}
