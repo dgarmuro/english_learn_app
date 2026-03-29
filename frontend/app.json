@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "English Learn",
+    "slug": "english-learn-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "englishlearn",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0A0A0F"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.yourname.englishlearn"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0A0A0F"
+      },
+      "package": "com.yourname.englishlearn"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-asset"
+    ]
+  }
+}

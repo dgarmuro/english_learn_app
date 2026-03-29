@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 from agents.conversational_agent.conversational_agent import graph as conversational_graph
@@ -11,6 +12,7 @@ from contextlib import asynccontextmanager
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from agents.conversational_agent.conversational_agent import graph as conversational_graph
 from datetime import datetime, timezone
+from fastapi import Request
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -21,6 +23,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="English Learner Chat", lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8081", "http://127.0.0.1:8081", "exp://localhost:8081", "*"],  # añade todos los posibles
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 security = HTTPBearer()
 
 # ── Auth ───────────────────────────────────────────────────
@@ -43,6 +52,9 @@ class SignInRequest(BaseModel):
     email: str
     password: str
 
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+    
 # ── Modelos ────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
@@ -110,7 +122,8 @@ async def chat(request: ChatRequest, current_user=Depends(get_current_user)):
 
 
 @app.post("/conversations")
-async def create_conversation(current_user=Depends(get_current_user)):
+async def create_conversation(request: Request, current_user=Depends(get_current_user)):
+    print("Headers recibidos:", dict(request.headers))
     thread_id = str(uuid.uuid4())
 
     supabase_admin.table("conversations").insert({
@@ -122,7 +135,9 @@ async def create_conversation(current_user=Depends(get_current_user)):
 
 
 @app.get("/conversations", response_model=list[ConversationInfo])
-async def get_conversations(current_user=Depends(get_current_user)):
+async def get_conversations(request: Request, current_user=Depends(get_current_user)):
+    print("Headers recibidos:", dict(request.headers))
+
     result = supabase.table("conversations") \
         .select("thread_id, created_at, topic") \
         .eq("user_id", current_user.id) \
@@ -257,17 +272,55 @@ async def signin(request: SignInRequest):
             "email": response.user.email,
         }
     except Exception as e:
+        print(f"Supabase error: {type(e).__name__}: {str(e)}")
         raise HTTPException(status_code=401, detail=str(e))
 
 
 @app.post("/auth/signout")
-async def signout(current_user=Depends(get_current_user)):
+async def signout():
     try:
         supabase.auth.sign_out()
         return {"message": "Signed out successfully"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-    
+
+@app.post("/auth/refresh")
+async def refresh(request: RefreshTokenRequest):
+    try:
+        response = supabase.auth.refresh_session(request.refresh_token)
+        return {
+            "access_token": response.session.access_token,
+            "refresh_token": response.session.refresh_token,
+            "token_type": "bearer"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+@app.post("/auth/signup")
+async def signup(request: SignUpRequest):
+    try:
+        response = supabase.auth.sign_up({
+            "email": request.email,
+            "password": request.password,
+        })
+
+        # Crear perfil en la tabla profiles
+        supabase.table("profiles").insert({
+            "id": response.user.id,
+            "email": request.email,
+            "level": 0
+        }).execute()
+
+        return {
+            "user_id": response.user.id,
+            "email": response.user.email,
+            "message": "User created successfully"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
