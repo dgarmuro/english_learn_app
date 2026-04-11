@@ -11,7 +11,7 @@ postgresql://postgres:[YOUR-PASSWORD]@db.iubtttjvqjidxhrhrdcl.supabase.co:5432/p
 ## Redis
 Para cache, estado en la conversación.
 docker run -d -p 6379:6379 redis
-pip intsall redis
+pip instsall redis
 pip install langgraph-checkpoint-redis
 
 ## Run 
@@ -65,3 +65,6 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
+
+# MCP
+langchain_mcp_adapters

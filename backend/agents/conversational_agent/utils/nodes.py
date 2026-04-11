@@ -16,13 +16,14 @@ def select_topic_node(state: EnglishLearnerState):
         "messages": [response]
     }
 
-def conversation_node(state: EnglishLearnerState):
+async def conversation_node(state: EnglishLearnerState, config: dict):
     
     system_message = SystemMessage(content=PROMPT_CONVERSACION)
+    mcp_tools = config["configurable"].get("mcp_tools", [])
 
-    response = llm_grok.invoke(
-        [system_message] + state["messages"]
-    )
+    llm_with_tools = llm_grok.bind_tools(mcp_tools)
+
+    response = await llm_with_tools.ainvoke( [system_message] + state["messages"])
 
     return {
         "messages": [response]

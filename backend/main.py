@@ -10,16 +10,29 @@ from services.redis import redis_client
 import uuid
 from contextlib import asynccontextmanager
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
-from agents.conversational_agent.conversational_agent import graph as conversational_graph
+from langchain_mcp_adapters.client import MultiServerMCPClient
 from datetime import datetime, timezone
 from fastapi import Request
+from dotenv import load_dotenv
+load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    Objeto donde FastAPI te deja guardar cosas globales
+    """
     async with AsyncRedisSaver.from_conn_string("redis://localhost:6379") as checkpointer:
-        await checkpointer.setup()
-        conversational_graph.checkpointer = checkpointer  # inyectar aquí
-        yield  # app arriba y corriendo
+        async with MultiServerMCPClient({
+            "mcp_server": {
+                "url": "http://localhost:8001/sse",
+                "transport": "sse",
+            }
+        }) as mcp_client:
+            await checkpointer.setup()
+            conversational_graph.checkpointer = checkpointer
+            app.state.mcp_tools = mcp_client.get_tools() # Guarda tool en app state y asi están disponibles durante la vida del server
+            yield
+        yield
 
 app = FastAPI(title="English Learner Chat", lifespan=lifespan)
 
@@ -100,7 +113,7 @@ async def chat(request: ChatRequest, current_user=Depends(get_current_user)):
     if not ownership.data:
         raise HTTPException(status_code=403, detail="Conversation not found or access denied")
 
-    config = {"configurable": {"thread_id": request.thread_id}}
+    config = {"configurable": {"thread_id": request.thread_id},"mcp_tools": req.app.state.mcp_tool}
 
     graph_result = await conversational_graph.ainvoke(
         {"messages": [HumanMessage(content=request.message)]},
