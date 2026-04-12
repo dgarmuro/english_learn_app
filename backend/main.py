@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File,Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -12,9 +12,12 @@ from contextlib import asynccontextmanager
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from datetime import datetime, timezone
-from fastapi import Request
+import whisper
+import tempfile
 from dotenv import load_dotenv
 load_dotenv()
+
+model = whisper.load_model("medium")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -22,16 +25,16 @@ async def lifespan(app: FastAPI):
     Objeto donde FastAPI te deja guardar cosas globales
     """
     async with AsyncRedisSaver.from_conn_string("redis://localhost:6379") as checkpointer:
-        async with MultiServerMCPClient({
+        await checkpointer.setup()
+        conversational_graph.checkpointer = checkpointer
+        mcp_client = MultiServerMCPClient({
             "mcp_server": {
                 "url": "http://localhost:8001/sse",
-                "transport": "sse",
+                "transport": "sse"
             }
-        }) as mcp_client:
-            await checkpointer.setup()
-            conversational_graph.checkpointer = checkpointer
-            app.state.mcp_tools = mcp_client.get_tools() # Guarda tool en app state y asi están disponibles durante la vida del server
-            yield
+        })
+            
+        app.state.mcp_tools = mcp_client.get_tools() # Guarda tool en app state y asi están disponibles durante la vida del server
         yield
 
 app = FastAPI(title="English Learner Chat", lifespan=lifespan)
@@ -333,7 +336,25 @@ async def signup(request: SignUpRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.post("/voice") # La idea es usar esto para "transcriptor" o para conversar por voz con el bot
+async def voice(audio: UploadFile = File(...)):
+    audio_bytes = await audio.read()
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        f.write(contenido)
+        ruta = f.name
+    try:
+        resultado = model.transcribe(
+            ruta,
+            language="es",
+            fp16=False,
+            temperature=0,
+        )
+        texto = resultado["text"].strip()
+    finally:
+        os.remove(ruta)
 
+    return {"texto": texto}
+    
 @app.get("/health")
 async def health():
     return {"status": "ok"}

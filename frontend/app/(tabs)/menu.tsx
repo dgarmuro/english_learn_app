@@ -21,6 +21,14 @@ const MENU_ITEMS = [
     color: '#4DC8F0',
     route: '/(tabs)/chat',
   },
+  {
+    id: 'voice',
+    emoji: '💬',
+    title: 'Transcribe audio',
+    subtitle: '',
+    color: '#4DC8F0',
+    route: '/(tabs)/voice',
+  },
 ];
 
 export default function Menu() {

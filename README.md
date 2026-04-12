@@ -22,6 +22,8 @@ npx expo install --fix
 npm install
 npx expo install expo-asset
 npx expo install react-native-web react-dom @expo/metro-runtime
+npx expo install expo-audio
+npx expo install expo-speech
 npx expo start --clear
 
 

@@ -95,6 +95,25 @@ export async function sendMessage(threadId: string, message: string) {
   return res.json(); // { response, correction }
 }
 
+// ── Audio ──────────────────────────────────────────────────
+
+export async function sendVoice(uri: string) {
+  const formData = new FormData();
+  formData.append('audio', {
+    uri,
+    name: 'audio.wav',
+    type: 'audio/wav',
+  } as any);
+  
+  const res = await fetch(`${BASE_URL}/voice`, {
+    method: 'POST',
+    headers: await authHeaders(),
+    body: formData,
+  });
+  if (!res.ok) throw new Error('Failed to send voice');
+  return res.json(); // { response, correction }
+}
+
 // ── Vocabulary ────────────────────────────────────────────
 
 export async function getVocabulary(limit = 10) {
