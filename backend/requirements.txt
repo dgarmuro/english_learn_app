@@ -18,3 +18,4 @@ dotenv==0.9.9
 langchain-mcp-adapters==0.2.2
 mcp==1.27.0
 fastmcp==3.2.3
+openai-whisper==20250625

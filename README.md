@@ -19,7 +19,7 @@ uvicorn main:app --reload --port 8000
 
 # FRONT
 npx expo install --fix
-npm install
+npm install --legacy-peer-deps
 npx expo install expo-asset
 npx expo install react-native-web react-dom @expo/metro-runtime
 npx expo install expo-audio
@@ -35,7 +35,7 @@ rm -rf node_modules
 rm -f package-lock.json
 
 2. Reinstala las dependencias
-npm install
+npm install --legacy-peer-deps
 
 3. Deja que Expo actualice todas las dependencias compatibles con SDK 54
 npx expo install --fix

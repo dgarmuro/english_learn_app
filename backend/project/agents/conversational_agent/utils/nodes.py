@@ -2,6 +2,7 @@ from langchain_core.messages import SystemMessage
 from .prompts import PROMPT_CONVERSACION,PROMPT_CORRECCION
 from .state import EnglishLearnerState
 from services.llm import llm_grok
+from langchain_core.runnables import RunnableConfig
 
 
 def select_topic_node(state: EnglishLearnerState):
@@ -16,7 +17,7 @@ def select_topic_node(state: EnglishLearnerState):
         "messages": [response]
     }
 
-async def conversation_node(state: EnglishLearnerState, config: dict):
+async def conversation_node(state: EnglishLearnerState, config: RunnableConfig | None):
     
     system_message = SystemMessage(content=PROMPT_CONVERSACION)
     mcp_tools = config["configurable"].get("mcp_tools", [])

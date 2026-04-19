@@ -14,27 +14,30 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from datetime import datetime, timezone
 import whisper
 import tempfile
+import os
 from dotenv import load_dotenv
 load_dotenv()
 
 model = whisper.load_model("medium")
+redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+mcp_url   = os.getenv("MCP_SERVER_URL", "http://localhost:8001/sse")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Objeto donde FastAPI te deja guardar cosas globales
     """
-    async with AsyncRedisSaver.from_conn_string("redis://localhost:6379") as checkpointer:
+    async with AsyncRedisSaver.from_conn_string(redis_url) as checkpointer:
         await checkpointer.setup()
         conversational_graph.checkpointer = checkpointer
         mcp_client = MultiServerMCPClient({
             "mcp_server": {
-                "url": "http://localhost:8001/sse",
+                "url": mcp_url,
                 "transport": "sse"
             }
         })
             
-        app.state.mcp_tools = mcp_client.get_tools() # Guarda tool en app state y asi están disponibles durante la vida del server
+        app.state.mcp_tools = await mcp_client.get_tools() # Guarda tool en app state y asi están disponibles durante la vida del server
         yield
 
 app = FastAPI(title="English Learner Chat", lifespan=lifespan)
@@ -103,7 +106,7 @@ class VocabularyReviewUpdate(BaseModel):
 # ── Endpoints ──────────────────────────────────────────────
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, current_user=Depends(get_current_user)):
+async def chat(req: Request, body: ChatRequest, current_user=Depends(get_current_user)):
     user_id = current_user.id
 
     ownership = supabase_admin.table("conversations") \
@@ -116,7 +119,9 @@ async def chat(request: ChatRequest, current_user=Depends(get_current_user)):
     if not ownership.data:
         raise HTTPException(status_code=403, detail="Conversation not found or access denied")
 
-    config = {"configurable": {"thread_id": request.thread_id},"mcp_tools": req.app.state.mcp_tool}
+    config = {"configurable": {"thread_id": body.thread_id}, "mcp_tools": req.app.state.mcp_tools}
+
+
 
     graph_result = await conversational_graph.ainvoke(
         {"messages": [HumanMessage(content=request.message)]},
@@ -312,35 +317,12 @@ async def refresh(request: RefreshTokenRequest):
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e))
 
-@app.post("/auth/signup")
-async def signup(request: SignUpRequest):
-    try:
-        response = supabase.auth.sign_up({
-            "email": request.email,
-            "password": request.password,
-        })
-
-        # Crear perfil en la tabla profiles
-        supabase.table("profiles").insert({
-            "id": response.user.id,
-            "email": request.email,
-            "level": 0
-        }).execute()
-
-        return {
-            "user_id": response.user.id,
-            "email": response.user.email,
-            "message": "User created successfully"
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
 
 @app.post("/voice") # La idea es usar esto para "transcriptor" o para conversar por voz con el bot
 async def voice(audio: UploadFile = File(...)):
     audio_bytes = await audio.read()
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        f.write(contenido)
+        f.write(audio_bytes)
         ruta = f.name
     try:
         resultado = model.transcribe(
